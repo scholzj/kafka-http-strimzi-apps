@@ -4,6 +4,9 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import io.jaegertracing.Configuration;
+import io.opentracing.Tracer;
+import io.opentracing.util.GlobalTracer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,6 +39,11 @@ public final class ProducerApp {
             HttpKafkaProducerConfig httpKafkaConsumerConfig = HttpKafkaProducerConfig.fromMap(envConfig);
 
             HttpKafkaProducer httpKafkaProducer = new HttpKafkaProducer(httpKafkaConsumerConfig);
+
+            if (System.getenv("JAEGER_SERVICE_NAME") != null) {
+                Tracer tracer = Configuration.fromEnv().getTracer();
+                GlobalTracer.registerIfAbsent(tracer);
+            }
 
             vertx.deployVerticle(httpKafkaProducer, done -> {
                 if (done.succeeded()) {

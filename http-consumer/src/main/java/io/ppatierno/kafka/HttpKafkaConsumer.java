@@ -1,8 +1,17 @@
 package io.ppatierno.kafka;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 
+import io.opentracing.Span;
+import io.opentracing.SpanContext;
+import io.opentracing.Tracer;
+import io.opentracing.propagation.Format;
+import io.opentracing.propagation.TextMapAdapter;
+import io.opentracing.tag.Tags;
+import io.opentracing.util.GlobalTracer;
+import io.vertx.core.MultiMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -82,7 +91,7 @@ public class HttpKafkaConsumer extends AbstractVerticle {
         Future<CreatedConsumer> fut = Future.future();
 
         JsonObject json = new JsonObject()
-            .put("name", "my-consumer")
+            .put("name", this.config.getGroupid())
             .put("format", "json");
 
         this.client.post(this.config.getEndpointPrefix() + "/consumers/" + this.config.getGroupid())
@@ -144,6 +153,31 @@ public class HttpKafkaConsumer extends AbstractVerticle {
                 if (ar.succeeded()) {
                     HttpResponse<JsonArray> response = ar.result();
                     if (response.statusCode() == HttpResponseStatus.OK.code()) {
+                        Tracer tracer = GlobalTracer.get();
+
+                        MultiMap rawHeaders = response.headers();
+                        final HashMap<String, String> headers = new HashMap<String, String>();
+                        for (String key : rawHeaders.names()) {
+                            headers.put(key, rawHeaders.get(key));
+                        }
+
+                        String operationName = "getRecord";
+                        Tracer.SpanBuilder spanBuilder;
+                        try {
+                            SpanContext parentSpan = tracer.extract(Format.Builtin.HTTP_HEADERS, new TextMapAdapter(headers));
+                            if (parentSpan == null) {
+                                log.info("No parent");
+                                spanBuilder = tracer.buildSpan(operationName);
+                            } else {
+                                log.info("Found parent");
+                                spanBuilder = tracer.buildSpan(operationName).asChildOf(parentSpan);
+                            }
+                        } catch (IllegalArgumentException e) {
+                            spanBuilder = tracer.buildSpan(operationName);
+                        }
+
+                        Span span = spanBuilder.withTag(Tags.SPAN_KIND.getKey(), Tags.SPAN_KIND_SERVER).start();
+
                         List<ConsumerRecord> list = new ArrayList<>();
                         response.body().forEach(obj -> {
                             JsonObject json = (JsonObject) obj;
@@ -156,6 +190,9 @@ public class HttpKafkaConsumer extends AbstractVerticle {
                                 );
                         });
                         this.messagesReceived += list.size();
+
+                        span.finish();
+
                         fut.complete(list);
                     } else {
                         fut.fail(new RuntimeException("Got HTTP status code " + response.statusCode()));

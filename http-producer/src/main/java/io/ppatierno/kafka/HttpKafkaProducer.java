@@ -1,8 +1,18 @@
 package io.ppatierno.kafka;
 
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 
+import io.opentracing.Span;
+import io.opentracing.Tracer;
+import io.opentracing.propagation.Format;
+import io.opentracing.propagation.TextMap;
+import io.opentracing.tag.Tags;
+import io.opentracing.util.GlobalTracer;
+import io.vertx.core.buffer.Buffer;
+import io.vertx.ext.web.client.HttpRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -49,10 +59,15 @@ public class HttpKafkaProducer extends AbstractVerticle {
         this.client = WebClient.create(vertx, options);
 
         this.sendTimer = vertx.setPeriodic(this.config.getSendInterval(), t -> {
-            this.send(this.config.getTopic()).setHandler(ar -> {
+            Tracer tracer = GlobalTracer.get();
+            Span span = tracer.buildSpan("sendRecord").withTag(Tags.SPAN_KIND.getKey(), Tags.SPAN_KIND_CLIENT).start();
+
+            this.send(this.config.getTopic(), span).setHandler(ar -> {
                 if (ar.succeeded()) {
                     log.info("Sent {}", ar.result());
                 }
+
+                span.finish();
             });
         });
         startFuture.complete();
@@ -65,14 +80,28 @@ public class HttpKafkaProducer extends AbstractVerticle {
         stopFuture.complete();
     }
 
-    private Future <List<OffsetRecordSent>> send(String topic) {
+    private Future <List<OffsetRecordSent>> send(String topic, Span span) {
         Future<List<OffsetRecordSent>> fut = Future.future();        
 
         JsonObject records = new JsonObject();
         records.put("records", new JsonArray().add(new JsonObject().put("value", "message-" + this.messagesSent++)));
 
-        this.client.post(this.config.getEndpointPrefix() + "/topics/" + topic)
-            .putHeader(HttpHeaderNames.CONTENT_LENGTH.toString(), String.valueOf(records.toBuffer().length()))
+        HttpRequest<Buffer> req = this.client.post(this.config.getEndpointPrefix() + "/topics/" + topic);
+
+        Tracer tracer = GlobalTracer.get();
+        tracer.inject(span.context(), Format.Builtin.HTTP_HEADERS, new TextMap() {
+            @Override
+            public void put(String key, String value) {
+                req.putHeader(key, value);
+            }
+
+            @Override
+            public Iterator<Map.Entry<String, String>> iterator() {
+                throw new UnsupportedOperationException("TextMapInjectAdapter should only be used with Tracer.inject()");
+            }
+        });
+
+        req.putHeader(HttpHeaderNames.CONTENT_LENGTH.toString(), String.valueOf(records.toBuffer().length()))
             .putHeader(HttpHeaderNames.CONTENT_TYPE.toString(), "application/vnd.kafka.json.v2+json")
             .as(BodyCodec.jsonObject())
             .sendJsonObject(records, ar -> {
